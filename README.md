@@ -47,11 +47,20 @@ Open http://localhost:8501 in your browser.
 
 If you add new files later, click **Build Knowledge Base** again; only new files are embedded incrementally. Removing or replacing a file triggers a full re-index.
 
+**Follow-up questions** are supported — the assistant remembers prior messages in the session (SQLite) and uses them when searching documents and generating answers. Refresh the page without losing chat: the session ID stays in the URL (`?session=...`).
+
+See **[DEMO.md](DEMO.md)** for a judge-ready demo script.
+
+## Hackathon scope
+
+This project implements **RAG mode + conversational memory** per sprint guidance. General Chat and Web Search modes are intentionally omitted.
+
 ## Project structure
 
 ```
 app.py              Streamlit UI
 rag_backend.py      RAG pipeline (parse → chunk → embed → retrieve → generate)
+memory.py           SQLite short-term chat memory
 data/uploads/       Saved uploaded files (gitignored)
 data/vectorstore/   FAISS index + manifest (gitignored)
 docs/               Design mockup (reference only)

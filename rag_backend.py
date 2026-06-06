@@ -53,7 +53,7 @@ MAX_RETRIEVAL_DISTANCE = 1.15
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 # How many prior user/assistant turns to include in memory-aware RAG.
-MEMORY_TURN_LIMIT = 6
+MEMORY_TURN_LIMIT = 12
 
 # Follow-up cues that benefit from query rewriting using chat history.
 FOLLOWUP_CUES = (
@@ -423,6 +423,7 @@ def build_knowledge_base(
 
 
 def get_indexed_chunk_count(vectorstore_dir: Union[str, Path] = VECTORSTORE_DIR) -> int:
+    repair_manifest_if_missing(vectorstore_dir=vectorstore_dir)
     stored = _read_index_manifest()
     if stored and "chunk_count" in stored:
         return int(stored["chunk_count"])
@@ -430,6 +431,29 @@ def get_indexed_chunk_count(vectorstore_dir: Union[str, Path] = VECTORSTORE_DIR)
     if vectorstore is None:
         return 0
     return vectorstore.index.ntotal
+
+
+def repair_manifest_if_missing(
+    upload_dir: Union[str, Path] = UPLOAD_DIR,
+    vectorstore_dir: Union[str, Path] = VECTORSTORE_DIR,
+) -> bool:
+    """Write manifest.json for a legacy index that predates manifest tracking."""
+    if MANIFEST_PATH.exists():
+        return False
+
+    index_file = Path(vectorstore_dir) / "index.faiss"
+    if not index_file.exists():
+        return False
+
+    import faiss
+
+    index = faiss.read_index(str(index_file))
+    current_manifest = get_upload_manifest(upload_dir)
+    if not current_manifest:
+        return False
+
+    _write_index_manifest(current_manifest, index.ntotal, vectorstore_dir)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -462,9 +486,8 @@ def _looks_like_followup(query: str) -> bool:
 
 def build_retrieval_query(query: str, chat_history: Optional[list[dict]] = None) -> str:
     """
-    Rewrite short or pronoun-heavy follow-ups using recent user messages so
-    vector search retrieves relevant passages (e.g. "How many days?" → includes
-    prior question about leave policy).
+    Rewrite short or pronoun-heavy follow-ups using recent conversation so
+    vector search retrieves relevant passages.
     """
     if not chat_history:
         return query
@@ -477,11 +500,23 @@ def build_retrieval_query(query: str, chat_history: Optional[list[dict]] = None)
         for msg in chat_history
         if msg.get("role") == "user" and msg.get("content", "").strip()
     ]
-    if not recent_user:
+    recent_assistant = [
+        msg["content"].strip()
+        for msg in chat_history
+        if msg.get("role") == "assistant" and msg.get("content", "").strip()
+    ]
+
+    parts: list[str] = []
+    if recent_user:
+        parts.extend(recent_user[-2:])
+    if recent_assistant:
+        # Last assistant reply helps disambiguate "they" / "those roles".
+        parts.append(recent_assistant[-1][:200])
+
+    if not parts:
         return query
 
-    context = recent_user[-2:]
-    return f"{' '.join(context)} {query}".strip()
+    return f"{' '.join(parts)} {query}".strip()
 
 
 def _to_langchain_messages(chat_history: list[dict], *, limit: int = MEMORY_TURN_LIMIT) -> list[BaseMessage]:
@@ -593,6 +628,65 @@ def generate_rag_answer(
     return response.content
 
 
+def generate_rag_answer_stream(
+    query: str,
+    context_chunks: list[Document],
+    *,
+    chat_history: Optional[list[dict]] = None,
+    groq_api_key: Optional[str] = None,
+    model: str = LLM_MODEL,
+):
+    """Stream tokens from the RAG answer generator."""
+    api_key = groq_api_key or os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "GROQ_API_KEY is required. Add it to .env (see .env.example) or pass "
+            "groq_api_key= to generate_rag_answer_stream()."
+        )
+
+    llm = ChatGroq(
+        api_key=api_key,
+        model=model,
+        temperature=0.2,
+        max_tokens=1024,
+        streaming=True,
+    )
+
+    history_messages = _to_langchain_messages(chat_history or [])
+    prompt_messages = [
+        (
+            "system",
+            "You are an enterprise knowledge assistant. Answer ONLY from the context "
+            "below — do not use outside knowledge. Use the conversation history to "
+            "understand follow-up questions (e.g. 'it', 'they', 'how many days'), but "
+            "ground every fact in the document context, not in prior answers alone. "
+            "Paraphrase or quote closely from the passages; do not invent facts. When "
+            "stating a fact, cite the source number like [1] or [2]. If the context does "
+            "not contain the answer, reply: 'I could not find this information in your "
+            "uploaded documents.'\n\n"
+            "Context:\n{context}",
+        ),
+    ]
+    if history_messages:
+        prompt_messages.append(MessagesPlaceholder("chat_history"))
+    prompt_messages.append(("human", "{question}"))
+
+    prompt = ChatPromptTemplate.from_messages(prompt_messages)
+    chain = prompt | llm
+
+    invoke_args: dict[str, Any] = {
+        "context": _format_context(context_chunks),
+        "question": query,
+    }
+    if history_messages:
+        invoke_args["chat_history"] = history_messages
+
+    for chunk in chain.stream(invoke_args):
+        text = chunk.content if hasattr(chunk, "content") else str(chunk)
+        if text:
+            yield text
+
+
 # ---------------------------------------------------------------------------
 # Pipeline helpers (used by app.py)
 # ---------------------------------------------------------------------------
@@ -658,4 +752,71 @@ def answer_question(
         "sources": format_sources_for_ui(chunks) if grounded else [],
         "grounded": grounded,
         "no_index": False,
+        "retrieval_query": build_retrieval_query(query, chat_history),
     }
+
+
+def answer_question_stream(
+    query: str,
+    vectorstore: Optional[FAISS] = None,
+    *,
+    chat_history: Optional[list[dict]] = None,
+    vectorstore_dir: Union[str, Path] = VECTORSTORE_DIR,
+    top_k: int = TOP_K,
+    groq_api_key: Optional[str] = None,
+):
+    """
+    Like answer_question but yields (event, payload) tuples for streaming UI.
+
+    Events: retrieval_done, token, complete, error
+    """
+    if vectorstore is None:
+        vectorstore = load_vectorstore(vectorstore_dir)
+
+    if vectorstore is None:
+        yield ("error", {"answer": "No knowledge base index found. Please upload and index documents first."})
+        return
+
+    chunks = retrieve_context(query, vectorstore, top_k=top_k, chat_history=chat_history)
+    yield (
+        "retrieval_done",
+        {
+            "context_chunks": chunks,
+            "retrieval_query": build_retrieval_query(query, chat_history),
+            "history_len": len(chat_history or []),
+        },
+    )
+
+    if not chunks:
+        yield (
+            "complete",
+            {
+                "answer": "I could not find relevant passages in your uploaded documents for this question.",
+                "context_chunks": [],
+                "sources": [],
+                "grounded": False,
+            },
+        )
+        return
+
+    tokens: list[str] = []
+    for token in generate_rag_answer_stream(
+        query,
+        chunks,
+        chat_history=chat_history,
+        groq_api_key=groq_api_key,
+    ):
+        tokens.append(token)
+        yield ("token", token)
+
+    answer = "".join(tokens)
+    grounded = not answer_indicates_no_info(answer)
+    yield (
+        "complete",
+        {
+            "answer": answer,
+            "context_chunks": chunks,
+            "sources": format_sources_for_ui(chunks) if grounded else [],
+            "grounded": grounded,
+        },
+    )

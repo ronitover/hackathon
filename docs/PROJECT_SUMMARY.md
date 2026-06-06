@@ -198,7 +198,7 @@ hackathon/
 
 These were not in scope for the fixes but are worth knowing:
 
-- **No conversational memory** — each question is standalone (no follow-up context)
+- **Conversational memory** — SQLite session history; follow-ups use prior turns for retrieval and generation
 - **No streaming** — user waits for the full LLM response
 - **Single-user local app** — Streamlit session state, no auth
 - **Heavy deps** — PyTorch + sentence-transformers (~500 MB+ RAM/disk)
