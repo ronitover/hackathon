@@ -56,8 +56,8 @@ VECTORSTORE_DIR = PROJECT_ROOT / "data" / "vectorstore"
 #   text for best results (handled in retrieve_context).
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
-# Groq-hosted Llama 3 8B with 8k context window.
-LLM_MODEL = "llama3-8b-8192"
+# Groq-hosted Llama 3.1 8B (replaces decommissioned llama3-8b-8192).
+LLM_MODEL = "llama-3.1-8b-instant"
 
 # Supported file extensions and their LangChain loaders.
 LOADER_MAP = {
@@ -72,6 +72,9 @@ CHUNK_OVERLAP = 150
 
 # Number of chunks to retrieve per query.
 TOP_K = 4
+
+# Max L2 distance (normalized embeddings) — chunks above this are treated as irrelevant.
+MAX_RETRIEVAL_DISTANCE = 1.15
 
 # BGE retrieval instruction — improves query-document matching for this model family.
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
@@ -372,7 +375,10 @@ def retrieve_context(
     # BGE models perform better when queries use this retrieval prefix.
     query_for_embedding = BGE_QUERY_PREFIX + query
 
-    return vectorstore.similarity_search(query_for_embedding, k=top_k)
+    results = vectorstore.similarity_search_with_score(query_for_embedding, k=top_k)
+
+    # Drop weak matches so we don't cite passages that aren't actually relevant.
+    return [doc for doc, distance in results if distance <= MAX_RETRIEVAL_DISTANCE]
 
 
 # ---------------------------------------------------------------------------
@@ -417,9 +423,9 @@ def generate_rag_answer(
       - Admit when context is insufficient (reduces hallucination).
       - Be concise and professional (enterprise assistant tone).
 
-    Groq llama3-8b-8192:
+    Groq llama-3.1-8b-instant:
       - Fast inference via Groq's LPU hardware.
-      - 8192-token context window — enough for top-k chunks + question.
+      - Large context window — enough for top-k chunks + question.
       - Requires GROQ_API_KEY in .env or environment (or passed explicitly).
 
     Args:
@@ -454,10 +460,11 @@ def generate_rag_answer(
         [
             (
                 "system",
-                "You are an enterprise knowledge assistant. Answer the user's question "
-                "using ONLY the context below. If the context does not contain enough "
-                "information, say so clearly — do not invent facts. Be concise, "
-                "professional, and cite source numbers like [1] when relevant.\n\n"
+                "You are an enterprise knowledge assistant. Answer ONLY from the context "
+                "below — do not use outside knowledge. Paraphrase or quote closely from "
+                "the passages; do not invent facts. When stating a fact, cite the source "
+                "number like [1] or [2]. If the context does not contain the answer, reply: "
+                "'I could not find this information in your uploaded documents.'\n\n"
                 "Context:\n{context}",
             ),
             ("human", "{question}"),
