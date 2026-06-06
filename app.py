@@ -44,15 +44,11 @@ SUGGESTIONS = [
     ("target", "What are the key objectives?", "Identify strategic goals and mission-critical targets in the data."),
 ]
 
-NAV_TABS = ["Conversations", "Models", "Security"]
-
-
 def init_state():
     defaults = {
         "messages": [],
         "prompt_area": "",
         "documents": [],
-        "active_tab": "Conversations",
         "show_welcome": True,
     }
     for key, value in defaults.items():
@@ -259,31 +255,6 @@ def inject_styles():
                 color: {c["on_surface"]};
                 letter-spacing: -0.01em;
                 white-space: nowrap;
-            }}
-
-            .topbar-nav {{
-                display: flex;
-                align-items: center;
-                gap: 1.5rem;
-            }}
-
-            .topbar-nav a {{
-                font-size: 12px;
-                font-weight: 600;
-                letter-spacing: 0.05em;
-                color: {c["on_surface_variant"]};
-                text-decoration: none;
-                padding-bottom: 4px;
-                border-bottom: 2px solid transparent;
-            }}
-
-            .topbar-nav a:hover {{
-                color: {c["primary"]};
-            }}
-
-            .topbar-nav a.active {{
-                color: {c["primary"]};
-                border-bottom-color: {c["primary"]};
             }}
 
             .topbar-right {{
@@ -790,17 +761,11 @@ def render_sidebar_status():
 
 
 def render_topbar():
-    active = st.session_state.active_tab
-    nav_links = "".join(
-        f'<a class="{"active" if tab == active else ""}" href="?tab={tab}">{tab}</a>'
-        for tab in NAV_TABS
-    )
     st.markdown(
         f"""
         <div class="topbar">
             <div class="topbar-left">
                 <span class="topbar-title">RAG Assistant</span>
-                <nav class="topbar-nav">{nav_links}</nav>
             </div>
             <div class="topbar-right">
                 <div class="status-pill pill-rag">
@@ -963,28 +928,10 @@ def process_uploads(uploaded_files):
     st.session_state.show_welcome = len(st.session_state.messages) == 0
 
 
-def render_tab_placeholder(icon: str, title: str, desc: str):
-    st.markdown(
-        f"""
-        <div class="hero-card">
-            <div class="hero-icon">
-                <span class="material-symbols-outlined" style="font-size:32px;">{icon}</span>
-            </div>
-            <h2 class="hero-title">{title}</h2>
-            <p class="hero-subtitle">{desc}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 init_state()
-
-if "tab" in st.query_params and st.query_params["tab"] in NAV_TABS:
-    st.session_state.active_tab = st.query_params["tab"]
 
 inject_styles()
 
@@ -1030,28 +977,13 @@ render_topbar()
 
 st.markdown('<div class="content-scroll"><div class="content-inner">', unsafe_allow_html=True)
 
-tab = st.session_state.active_tab
-if tab == "Conversations":
-    if st.session_state.messages:
-        render_messages()
-    elif st.session_state.show_welcome:
-        render_hero()
-        render_suggestions()
-elif tab == "Models":
-    render_tab_placeholder(
-        "model_training",
-        "Model Configuration",
-        "Select and configure the LLM powering your RAG pipeline. Enterprise models support temperature tuning, token limits, and grounding strength controls.",
-    )
-else:
-    render_tab_placeholder(
-        "shield_lock",
-        "Security & Compliance",
-        "Manage access controls, audit logs, and data retention policies. All queries are processed within your secure enterprise instance with end-to-end encryption.",
-    )
+if st.session_state.messages:
+    render_messages()
+elif st.session_state.show_welcome:
+    render_hero()
+    render_suggestions()
 
 st.markdown("</div></div>", unsafe_allow_html=True)
 
-if tab == "Conversations":
-    st.markdown('<div class="chat-dock-marker"></div>', unsafe_allow_html=True)
-    render_chat_input()
+st.markdown('<div class="chat-dock-marker"></div>', unsafe_allow_html=True)
+render_chat_input()
